@@ -1,0 +1,10 @@
+title = "sdg gitleaks"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Plantillas de entorno con placeholders"
+paths = [
+  '''env/\.env\.(dev|prod)\.example''',
+]

@@ -1,0 +1,2 @@
+{"warehouse_pg": {"conn_type": "postgres", "host": "postgres", "port": 5432,
+  "schema": "${WAREHOUSE_DB_NAME}", "login": "${WAREHOUSE_DB_USER}", "password": "${WAREHOUSE_DB_PASS}"}}

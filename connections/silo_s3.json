@@ -1,0 +1,2 @@
+{"silo_s3": {"conn_type": "aws", "login": "${SILO_APP_ACCESS_KEY}", "password": "${SILO_APP_SECRET_KEY}",
+  "extra": {"endpoint_url": "${S3_ENDPOINT_URL}", "region_name": "us-east-1"}}}

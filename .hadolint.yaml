@@ -1,0 +1,3 @@
+ignored:
+  - DL3013   # pip sin versión exacta: se pinnea con el archivo oficial de constraints
+  - DL3042   # --no-cache-dir ya se usa

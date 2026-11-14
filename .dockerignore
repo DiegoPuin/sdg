@@ -1,0 +1,10 @@
+.git
+.venv
+env/.env.dev
+env/.env.prod
+data
+tests
+out
+e2e-logs
+__pycache__
+*.egg-info

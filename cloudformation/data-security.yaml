@@ -1,0 +1,226 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Capa de datos y seguridad (S3, KMS, IAM, Secrets Manager, RDS PostgreSQL) de la plataforma SDG.
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [dev, prod]
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  PrivateSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+  AllowedSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Grupo de seguridad de la carga de trabajo que puede acceder a la base de datos.
+  DBInstanceClass:
+    Type: String
+    Default: db.t4g.medium
+  MultiAZ:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "false"
+  AccessLogBucketName:
+    Type: String
+    Default: ""
+    Description: Bucket de destino de los logs de acceso de S3. Vacío = registro desactivado.
+
+Conditions:
+  IsProd: !Equals [!Ref Environment, prod]
+  IsMultiAZ: !Equals [!Ref MultiAZ, "true"]
+  HasAccessLogBucket: !Not [!Equals [!Ref AccessLogBucketName, ""]]
+
+Resources:
+  DataKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub Cifrado de datos y secretos (${Environment})
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          # checkov:skip=CKV_AWS_109: la política raíz de la clave delega en IAM (patrón estándar de KMS)
+          # checkov:skip=CKV_AWS_111: la política raíz de la clave delega en IAM (patrón estándar de KMS)
+          # checkov:skip=CKV_AWS_356: en una política de clave, Resource "*" se refiere a la propia clave
+          - Sid: EnableIamPolicies
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:root
+            Action: kms:*
+            Resource: "*"
+
+  DataKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub alias/sdg-${Environment}-data
+      TargetKeyId: !Ref DataKey
+
+  DataBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    # checkov:skip=CKV_AWS_18: el registro de acceso solo se activa si se parametriza un bucket de logs (AccessLogBucketName)
+    # checkov:skip=CKV2_AWS_62: sin notificaciones de eventos; el pipeline consulta el bucket directamente
+    # checkov:skip=CKV_AWS_144: la replicación entre regiones queda como mejora (ver docs/aws-proposal.md)
+    Properties:
+      BucketName: !Sub data-${Environment}-${AWS::AccountId}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - BucketKeyEnabled: true
+            ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !GetAtt DataKey.Arn
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LoggingConfiguration: !If
+        - HasAccessLogBucket
+        - DestinationBucketName: !Ref AccessLogBucketName
+          LogFilePrefix: !Sub data-${Environment}/
+        - !Ref AWS::NoValue
+      LifecycleConfiguration:
+        Rules:
+          - Id: historic-tiering
+            Status: Enabled
+            Prefix: demo/output/historic/
+            Transitions:
+              - StorageClass: STANDARD_IA
+                TransitionInDays: 90
+              - StorageClass: GLACIER
+                TransitionInDays: 365
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 90
+          - Id: abort-multipart
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+
+  DataBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref DataBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !GetAtt DataBucket.Arn
+              - !Sub ${DataBucket.Arn}/*
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+  DatabaseSecret:
+    Type: AWS::SecretsManager::Secret
+    # checkov:skip=CKV2_AWS_57: la rotación automática requiere una función de rotación; se propone en docs/aws-proposal.md
+    Properties:
+      Description: !Sub Credenciales del warehouse (${Environment})
+      KmsKeyId: !Ref DataKey
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "warehouse_rw"}'
+        GenerateStringKey: password
+        PasswordLength: 32
+        ExcludePunctuation: true
+
+  AirflowWorkloadRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Rol de carga de trabajo de Airflow (sin claves estáticas)
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ecs-tasks.amazonaws.com
+                - airflow-env.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: data-and-secret-access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ListBucket
+                Effect: Allow
+                Action: [s3:ListBucket, s3:GetBucketLocation]
+                Resource: !GetAtt DataBucket.Arn
+              - Sid: ReadWriteObjects
+                Effect: Allow
+                Action: [s3:GetObject, s3:PutObject, s3:DeleteObject, s3:AbortMultipartUpload]
+                Resource: !Sub ${DataBucket.Arn}/*
+              - Sid: UseDataKey
+                Effect: Allow
+                Action: [kms:Decrypt, kms:Encrypt, kms:GenerateDataKey]
+                Resource: !GetAtt DataKey.Arn
+              - Sid: ReadDatabaseSecret
+                Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref DatabaseSecret
+
+  DatabaseSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: !Sub Subredes privadas del warehouse (${Environment})
+      SubnetIds: !Ref PrivateSubnetIds
+
+  DatabaseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Acceso a PostgreSQL solo desde la carga de trabajo autorizada
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref AllowedSecurityGroupId
+          Description: PostgreSQL desde la carga de trabajo
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 127.0.0.1/32
+          Description: Sin salida a Internet
+
+  WarehouseDatabase:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    # checkov:skip=CKV_AWS_157: Multi-AZ se controla por el parámetro MultiAZ (false en dev para reducir costes; true en prod)
+    # checkov:skip=CKV_AWS_118: la monitorización mejorada requiere un rol adicional; se propone para prod en docs/aws-proposal.md
+    # checkov:skip=CKV_AWS_129: los logs se exportan a CloudWatch mediante EnableCloudwatchLogsExports
+    Properties:
+      Engine: postgres
+      EngineVersion: "17.5"
+      DBInstanceClass: !Ref DBInstanceClass
+      DBName: warehouse
+      AllocatedStorage: "50"
+      StorageType: gp3
+      StorageEncrypted: true
+      KmsKeyId: !GetAtt DataKey.Arn
+      MasterUsername: !Sub "{{resolve:secretsmanager:${DatabaseSecret}:SecretString:username}}"
+      MasterUserPassword: !Sub "{{resolve:secretsmanager:${DatabaseSecret}:SecretString:password}}"
+      DBSubnetGroupName: !Ref DatabaseSubnetGroup
+      VPCSecurityGroups:
+        - !Ref DatabaseSecurityGroup
+      PubliclyAccessible: false
+      MultiAZ: !If [IsMultiAZ, true, false]
+      BackupRetentionPeriod: !If [IsProd, 14, 7]
+      DeletionProtection: !If [IsProd, true, false]
+      AutoMinorVersionUpgrade: true
+      CopyTagsToSnapshot: true
+      EnableIAMDatabaseAuthentication: true
+      EnableCloudwatchLogsExports: [postgresql, upgrade]
+
+Outputs:
+  BucketArn:
+    Value: !GetAtt DataBucket.Arn
+  AirflowRoleArn:
+    Value: !GetAtt AirflowWorkloadRole.Arn
+  DatabaseSecretArn:
+    Value: !Ref DatabaseSecret
+  DatabaseEndpoint:
+    Value: !GetAtt WarehouseDatabase.Endpoint.Address

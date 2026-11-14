@@ -1,0 +1,126 @@
+name: cd
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build-publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.ref.outputs.image }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: versions
+        run: grep '^AIRFLOW_VERSION=' env/versions.env >> "$GITHUB_OUTPUT"
+      - id: name
+        run: echo "repo=$(echo "ghcr.io/${GITHUB_REPOSITORY}/airflow" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: docker/airflow/Dockerfile
+          build-args: AIRFLOW_VERSION=${{ steps.versions.outputs.AIRFLOW_VERSION }}
+          push: true
+          tags: ${{ steps.name.outputs.repo }}:sha-${{ github.sha }}
+      - id: ref
+        env:
+          REPO: ${{ steps.name.outputs.repo }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: echo "image=${REPO}@${DIGEST}" >> "$GITHUB_OUTPUT"
+
+  integration:
+    needs: [build-publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    env:
+      AIRFLOW_IMAGE: ${{ needs.build-publish.outputs.image }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - run: pip install pandas
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - run: tests/e2e/run_e2e.sh dev
+      - if: failure()
+        run: ls -la e2e-logs || true
+
+  deploy-dev:
+    needs: [build-publish, integration]
+    if: vars.ENABLE_DEPLOY == 'true'
+    runs-on: [self-hosted, local-docker]
+    environment: dev
+    concurrency:
+      group: deploy-dev
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: make env ENV=dev
+      - run: make deploy ENV=dev AIRFLOW_IMAGE="${{ needs.build-publish.outputs.image }}"
+      - run: make verify ENV=dev
+
+  deploy-prod:
+    needs: [build-publish, deploy-dev]
+    if: vars.ENABLE_DEPLOY == 'true'
+    runs-on: [self-hosted, local-docker]
+    environment: prod
+    concurrency:
+      group: deploy-prod
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: make env ENV=prod
+      - run: make deploy ENV=prod AIRFLOW_IMAGE="${{ needs.build-publish.outputs.image }}"
+      - run: make verify ENV=prod
+      # Solo tras un despliegue correcto: la imagen anterior pasa a ser PREV_IMAGE.
+      - name: Guardar PREV_IMAGE
+        env:
+          GH_TOKEN: ${{ secrets.VARS_ADMIN_TOKEN }}
+          IMAGE: ${{ needs.build-publish.outputs.image }}
+        run: gh variable set PREV_IMAGE --env prod --repo "${GITHUB_REPOSITORY}" --body "${IMAGE}"
+
+  rollback-prod:
+    needs: [deploy-prod]
+    if: ${{ always() && needs.deploy-prod.result == 'failure' && vars.ENABLE_DEPLOY == 'true' }}
+    runs-on: [self-hosted, local-docker]
+    environment: prod
+    concurrency:
+      group: deploy-prod
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Redesplegar imagen anterior
+        env:
+          PREV_IMAGE: ${{ vars.PREV_IMAGE }}
+        run: |
+          test -n "${PREV_IMAGE}" || { echo "PREV_IMAGE no está definida"; exit 1; }
+          make deploy ENV=prod AIRFLOW_IMAGE="${PREV_IMAGE}"
+      - run: make verify ENV=prod
