@@ -76,7 +76,7 @@
           "name": "write_delta_raw",
           "type": "table",
           "input": "group_by_fields",
-          "config": { "table": "raw_demo", "save_mode": "append" }
+          "config": { "table": "historic_demo", "save_mode": "append" }
         }
       ]
     }
