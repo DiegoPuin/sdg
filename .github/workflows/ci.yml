@@ -109,6 +109,8 @@ jobs:
           cache-from: type=gha
       - name: Importar DAGs
         run: |
-          out="$(docker run --rm sdg-airflow:ci airflow dags list-import-errors)"
+          # La imagen no trae base de datos: se migra una SQLite efímera y se parsean los DAGs.
+          out="$(docker run --rm sdg-airflow:ci bash -c \
+            'airflow db migrate >/dev/null 2>&1 && airflow dags reserialize >/dev/null 2>&1; airflow dags list-import-errors')"
           echo "${out}"
           echo "${out}" | grep -q "No data found"
