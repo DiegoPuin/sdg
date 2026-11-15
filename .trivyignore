@@ -1,0 +1,36 @@
+# Hallazgos HIGH con corrección disponible que NO se corrigen, con su motivo.
+# Revisar al subir la versión de Airflow.
+
+# --- litellm: paquete de la imagen base de Airflow; este proyecto no lo importa ni lo ejecuta.
+GHSA-g5ff-637f-6q2m
+
+# --- JARs embebidos en el paquete Python `ray` (jackson-core, guava): el proyecto no usa ray ni la JVM.
+CVE-2026-89407
+CVE-2026-89425
+CVE-2026-68497
+CVE-2026-91776
+CVE-2026-91777
+CVE-2026-102554
+
+# --- linux-libc-dev: solo cabeceras del kernel para compilar; no hay kernel ni código del kernel en el contenedor.
+CVE-2026-98466
+CVE-2026-98715
+CVE-2026-98853
+CVE-2026-99109
+CVE-2026-99281
+CVE-2026-99288
+
+# --- zlib1g / zlib1g-dev: la imagen base ya trae la versión corregida (1.3.1-1+deb13u1+dhi0) y el repositorio
+#     de Debian no ofrece otra más nueva; Trivy la sigue marcando por el sufijo +dhi0 de la imagen base.
+CVE-2026-76844
+CVE-2026-85091
+
+# --- aiohttp 3.14.3: copia vendorizada dentro de ray (ray/_private/runtime_env/agent/thirdparty_files).
+#     El aiohttp que usa Airflow es el instalado en site-packages (>=3.14.4, actualizado en el Dockerfile).
+CVE-2026-111064
+CVE-2026-111066
+CVE-2026-123817
+
+# --- setuptools 70.3.0: copia vendorizada que no se localiza en el sistema de ficheros de la imagen; el
+#     setuptools instalado es 84.2.1 (actualizado en el Dockerfile). Revisar si reaparece al subir Airflow.
+CVE-2025-47273

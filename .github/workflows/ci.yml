@@ -86,6 +86,7 @@ jobs:
           image-ref: sdg-airflow:ci
           severity: HIGH,CRITICAL
           ignore-unfixed: true
+          trivyignores: .trivyignore
           exit-code: "1"
 
   dag-validate:
