@@ -1,6 +1,6 @@
 ARG AIRFLOW_VERSION
 
-FROM python:3.12-slim AS build
+FROM python:3.15-slim AS build
 WORKDIR /src
 COPY pyproject.toml ./
 COPY src ./src
